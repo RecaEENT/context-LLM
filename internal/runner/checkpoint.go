@@ -30,6 +30,8 @@ type Checkpoint struct {
 	Trials          []Trial `json:"trials"`
 }
 
+// ConfigSignature tracks every configuration field except APIKey. Keep the
+// serialized snapshot stable so existing checkpoints remain resumable.
 func ConfigSignature(cfg config.Config) string {
 	snapshot := struct {
 		BaseURL               string   `json:"base_url"`

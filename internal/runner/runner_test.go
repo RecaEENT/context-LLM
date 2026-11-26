@@ -1,17 +1,21 @@
 package runner
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"context-LLM/internal/config"
 	"context-LLM/internal/provider"
+	"context-LLM/internal/scoring"
 )
 
 func TestCalibration(t *testing.T) {
@@ -152,6 +156,52 @@ func TestCheckpointRoundTripAndConfigGuard(t *testing.T) {
 	}
 }
 
+func TestConfigSignatureTracksAllNonSecretFields(t *testing.T) {
+	base := config.Config{}
+	baseline := ConfigSignature(base)
+	configType := reflect.TypeOf(base)
+	for i := 0; i < configType.NumField(); i++ {
+		field := configType.Field(i)
+		t.Run(field.Name, func(t *testing.T) {
+			changed := base
+			value := reflect.ValueOf(&changed).Elem().FieldByName(field.Name)
+			switch value.Kind() {
+			case reflect.String:
+				value.SetString("changed")
+			case reflect.Bool:
+				value.SetBool(true)
+			case reflect.Int:
+				value.SetInt(1)
+			case reflect.Int64:
+				value.SetInt(int64(time.Second))
+			case reflect.Float64:
+				value.SetFloat(1)
+			case reflect.Slice:
+				element := reflect.New(value.Type().Elem()).Elem()
+				switch element.Kind() {
+				case reflect.String:
+					element.SetString("changed")
+				case reflect.Int:
+					element.SetInt(1)
+				default:
+					t.Fatalf("unhandled slice field type: %s", value.Type())
+				}
+				value.Set(reflect.Append(reflect.MakeSlice(value.Type(), 0, 1), element))
+			default:
+				t.Fatalf("unhandled config field type: %s", value.Type())
+			}
+			equal := ConfigSignature(changed) == baseline
+			if field.Name == "APIKey" {
+				if !equal {
+					t.Fatal("API key must not affect checkpoint signature")
+				}
+			} else if equal {
+				t.Fatalf("%s is omitted from checkpoint signature", field.Name)
+			}
+		})
+	}
+}
+
 func TestResumeRestoresCalibrationAndStopsOnRequestFailure(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +271,104 @@ func TestEnhancedStopsOnFailedResponseWithHTTP200(t *testing.T) {
 	}
 	if loaded.BinaryLow != 13000 || loaded.BinaryHigh != 40000 {
 		t.Fatalf("failure changed bounds: %#v", loaded)
+	}
+}
+
+func TestRunTierReusesTrialsInSerialAndParallel(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		t.Run(fmt.Sprintf("parallel=%t", parallel), func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"context_too_large"}`)
+			}))
+			defer server.Close()
+			cfg := config.Config{BaseURL: server.URL, APIMode: "chat-completions", Timeout: time.Second, CharsPerToken: 1, MaxOutputTokens: 2500, AnchorCount: 13, TestModes: []string{"needle"}, ParallelTests: parallel}
+			r := New(cfg, t.TempDir(), io.Discard)
+			state := r.newCheckpoint("configured")
+			first, err := r.runTier(13000, "primary", &state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.passed || !first.contextTooLarge || first.requestFailed || len(first.trials) != 3 || requests.Load() != 3 {
+				t.Fatalf("unexpected outcome: %#v", first)
+			}
+			second, err := r.runTier(13000, "primary", &state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(second.trials) != 3 || requests.Load() != 3 {
+				t.Fatalf("completed trials were not reused: %#v", second)
+			}
+		})
+	}
+}
+
+func TestRunTrialExpandsTruncatedOutput(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"choices":[{"finish_reason":"length","message":{"content":"{}"}}],"usage":{"prompt_tokens":100,"completion_tokens":10}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":100,"completion_tokens":20}}`)
+	}))
+	defer server.Close()
+	cfg := config.Config{BaseURL: server.URL, APIMode: "chat-completions", Timeout: time.Second, CharsPerToken: 1, MaxOutputTokens: 2500, AnchorCount: 13, TestModes: []string{"needle"}}
+	trial, err := New(cfg, t.TempDir(), io.Discard).runTrial(13000, "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 || trial.OutputRetries != 1 || trial.MaxOutputTokensUsed != 5000 || len(trial.ResponseAttemptMetadata) != 2 {
+		t.Fatalf("unexpected trial: %#v", trial)
+	}
+}
+
+func TestRunTrialRetriesServerFailure(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":"unavailable"}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"context_too_large"}`)
+	}))
+	defer server.Close()
+	cfg := config.Config{BaseURL: server.URL, APIMode: "chat-completions", Timeout: time.Second, TransportRetries: 1, CharsPerToken: 1, MaxOutputTokens: 2500, AnchorCount: 13, TestModes: []string{"needle"}}
+	trial, err := New(cfg, t.TempDir(), io.Discard).runTrial(13000, "primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 || trial.Attempts != 2 || len(trial.ResponseAttemptMetadata) != 2 || !trial.ContextTooLarge {
+		t.Fatalf("unexpected trial: %#v", trial)
+	}
+}
+
+func TestBinarySearchUsesCompletedTrialsForBounds(t *testing.T) {
+	cfg := config.Config{BinaryPrecisionTokens: 5000}
+	r := New(cfg, t.TempDir(), io.Discard)
+	state := r.newCheckpoint("binary")
+	state.BinaryLow, state.BinaryHigh = 13000, 33000
+	for _, step := range []struct {
+		tier          int
+		label, result string
+	}{
+		{20000, "binary_13000_33000", scoring.StatePassed},
+		{25000, "binary_20000_33000", scoring.StateScoredFailure},
+	} {
+		for repetition := 1; repetition <= 3; repetition++ {
+			state.Trials = append(state.Trials, Trial{Tier: step.tier, Label: fmt.Sprintf("%s_%d", step.label, repetition), Score: scoring.Score{State: step.result}})
+		}
+	}
+	trials, err := r.runBinarySearch(&state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Complete || state.BinaryLow != 20000 || state.BinaryHigh != 25000 || len(trials) != 6 {
+		t.Fatalf("unexpected bounds: %#v", state)
 	}
 }
 

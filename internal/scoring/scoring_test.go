@@ -27,7 +27,7 @@ func TestGeneratedCorpusScoresPerfectResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	score := Response(root, map[string]any{"_extracted_text": string(response)}, 0)
+	score := Response(root, ResponseInput{Text: string(response)}, 0)
 	if score.State != "passed" || score.AnswerHits != 13 || score.EvidenceHits != 13 {
 		t.Fatalf("unexpected score: %#v", score)
 	}
@@ -44,7 +44,7 @@ func TestEvidenceRequiresCompleteRecordID(t *testing.T) {
 		answer.Evidence = value
 		answers["Q01"] = answer
 		data, _ := json.Marshal(answers)
-		if score := Response(root, map[string]any{"_extracted_text": string(data)}, 0); score.State != "scored_failure" {
+		if score := Response(root, ResponseInput{Text: string(data)}, 0); score.State != "scored_failure" {
 			t.Fatalf("incorrect evidence %q passed: %#v", value, score)
 		}
 	}
@@ -52,7 +52,7 @@ func TestEvidenceRequiresCompleteRecordID(t *testing.T) {
 	answer.Evidence = "Record [ND-01], verified."
 	answers["Q01"] = answer
 	data, _ := json.Marshal(answers)
-	if score := Response(root, map[string]any{"_extracted_text": string(data)}, 0); score.State != "passed" {
+	if score := Response(root, ResponseInput{Text: string(data)}, 0); score.State != "passed" {
 		t.Fatalf("valid evidence failed: %#v", score)
 	}
 }
@@ -74,7 +74,7 @@ func TestFiftyAnchorsGenerateAndScore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	score := Response(root, map[string]any{"_extracted_text": string(response)}, 0)
+	score := Response(root, ResponseInput{Text: string(response)}, 0)
 	if score.State != "passed" || score.QuestionCount != 50 {
 		t.Fatalf("unexpected 50-anchor score: %#v", score)
 	}
@@ -90,17 +90,17 @@ func TestEvidenceToleranceRequiresCorrectAnswers(t *testing.T) {
 	badEvidence.Evidence = "wrong-record"
 	answers["Q01"] = badEvidence
 	response, _ := json.Marshal(answers)
-	if score := Response(root, map[string]any{"_extracted_text": string(response)}, 0); score.State != "scored_failure" {
+	if score := Response(root, ResponseInput{Text: string(response)}, 0); score.State != "scored_failure" {
 		t.Fatalf("zero tolerance unexpectedly passed: %#v", score)
 	}
-	if score := Response(root, map[string]any{"_extracted_text": string(response)}, 1); score.State != "passed" {
+	if score := Response(root, ResponseInput{Text: string(response)}, 1); score.State != "passed" {
 		t.Fatalf("one evidence miss should pass at tolerance 1: %#v", score)
 	}
 	badAnswer := answers["Q02"]
 	badAnswer.Answer = "wrong-answer"
 	answers["Q02"] = badAnswer
 	response, _ = json.Marshal(answers)
-	if score := Response(root, map[string]any{"_extracted_text": string(response)}, 50); score.State != "scored_failure" {
+	if score := Response(root, ResponseInput{Text: string(response)}, 50); score.State != "scored_failure" {
 		t.Fatalf("incorrect answer unexpectedly passed: %#v", score)
 	}
 }
@@ -120,7 +120,7 @@ func TestScoreBreaksDownByModeAndToleranceIsPerMode(t *testing.T) {
 		}
 	}
 	response, _ := json.Marshal(answers)
-	score := Response(root, map[string]any{"_extracted_text": string(response)}, 1)
+	score := Response(root, ResponseInput{Text: string(response)}, 1)
 	if score.State != "passed" {
 		t.Fatalf("one evidence miss per mode should pass at per-mode tolerance 1: %#v", score)
 	}
@@ -138,7 +138,7 @@ func TestScoreBreaksDownByModeAndToleranceIsPerMode(t *testing.T) {
 		answers[qid] = answer
 	}
 	response, _ = json.Marshal(answers)
-	score = Response(root, map[string]any{"_extracted_text": string(response)}, 1)
+	score = Response(root, ResponseInput{Text: string(response)}, 1)
 	if score.State != "scored_failure" {
 		t.Fatalf("two evidence misses per mode should fail at tolerance 1: %#v", score)
 	}
@@ -158,7 +158,7 @@ func TestModeSpecificAnswerAndEvidenceFailures(t *testing.T) {
 		badAnswer.Answer = "WRONG-ANSWER"
 		answerFailure[qid] = badAnswer
 		response, _ := json.Marshal(answerFailure)
-		score := Response(root, map[string]any{"_extracted_text": string(response)}, 0)
+		score := Response(root, ResponseInput{Text: string(response)}, 0)
 		if score.State != "scored_failure" || score.ByMode[mode].AnswerHits != score.ByMode[mode].QuestionCount-1 {
 			t.Fatalf("%s answer failure not isolated: %#v", mode, score)
 		}
@@ -168,7 +168,7 @@ func TestModeSpecificAnswerAndEvidenceFailures(t *testing.T) {
 		badEvidence.Evidence = "WRONG-EVIDENCE"
 		evidenceFailure[qid] = badEvidence
 		response, _ = json.Marshal(evidenceFailure)
-		score = Response(root, map[string]any{"_extracted_text": string(response)}, 0)
+		score = Response(root, ResponseInput{Text: string(response)}, 0)
 		if score.State != "scored_failure" || score.ByMode[mode].EvidenceHits != score.ByMode[mode].QuestionCount-1 {
 			t.Fatalf("%s evidence failure not isolated: %#v", mode, score)
 		}
@@ -201,12 +201,28 @@ func TestRequestFailurePreservesProviderError(t *testing.T) {
 	if _, err := corpus.Generate(root, 13000, 2026110814, 1, 13, []string{"needle", "multi_hop", "conflict", "adversarial"}); err != nil {
 		t.Fatal(err)
 	}
-	score := Response(root, map[string]any{
-		"http_status": 429,
-		"error":       `{"error":{"message":"usage limit reached","code":"usage_limit_reached"}}`,
+	score := Response(root, ResponseInput{
+		HTTPStatus:  429,
+		ErrorDetail: `{"error":{"message":"usage limit reached","code":"usage_limit_reached"}}`,
 	}, 0)
 	if score.State != "request_failed" || !strings.Contains(score.Detail, "usage limit reached") {
 		t.Fatalf("provider error detail missing: %#v", score)
+	}
+}
+
+func TestTypedResponseFailureStates(t *testing.T) {
+	root := t.TempDir()
+	if _, err := corpus.Generate(root, 13000, 42, 1, 13, []string{"needle"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []ResponseInput{
+		{HTTPStatus: 500, ErrorDetail: "server error"},
+		{TransportError: "network error"},
+		{HTTPStatus: 200, ProviderError: true, ErrorDetail: "provider error"},
+	} {
+		if score := Response(root, input, 0); score.State != StateRequestFailed || score.Detail == "" {
+			t.Fatalf("failure lost: %#v", score)
+		}
 	}
 }
 

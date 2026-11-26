@@ -180,6 +180,141 @@ func orDash(value string) string {
 	return value
 }
 
+func tierSummaryRow(stat TierStats, status string) string {
+	inputAverage, inputMedian, inputRange := "—", "—", "—"
+	if stat.PromptTokensSamples > 0 {
+		inputAverage = formatK(int(stat.PromptTokensAverage))
+		inputMedian = formatK(stat.PromptTokensMedian)
+		inputRange = fmt.Sprintf("%s–%s", formatK(stat.PromptTokensMin), formatK(stat.PromptTokensMax))
+	}
+	outputAverage, inputTotal, outputTotal, totalAverage := "—", "—", "—", "—"
+	if stat.CompletionTokensSamples > 0 {
+		outputAverage = formatK(int(stat.CompletionTokensAverage))
+	}
+	if stat.PromptTokensTotal > 0 {
+		inputTotal = formatK(stat.PromptTokensTotal)
+	}
+	if stat.CompletionTokensTotal > 0 {
+		outputTotal = formatK(stat.CompletionTokensTotal)
+	}
+	if stat.TotalTokensSamples > 0 {
+		totalAverage = formatK(int(stat.TotalTokensAverage))
+	}
+	return fmt.Sprintf("| %s | %s | %d | %d | %.1f%% | %d | %d | %s | %s | %s | %s | %s | %s | %s | %.2fs | %.2fs | %.2fs |",
+		comma(stat.Tier), status, stat.Trials, stat.Passed, stat.PassRatePercent, stat.ContextLimits, stat.Failed,
+		inputAverage, inputMedian, inputRange, inputTotal, outputAverage, outputTotal, totalAverage,
+		stat.ElapsedSecondsAverage, stat.ElapsedSecondsMedian, stat.ElapsedSecondsP95)
+}
+
+func modeBreakdownRows(trials []runner.Trial) []string {
+	var rows []string
+	for _, trial := range trials {
+		modes := make([]string, 0, len(trial.Score.ByMode))
+		for mode := range trial.Score.ByMode {
+			modes = append(modes, mode)
+		}
+		sort.Strings(modes)
+		for _, mode := range modes {
+			score := trial.Score.ByMode[mode]
+			rows = append(rows, fmt.Sprintf("| %s | %s | %s | %d/%d | %d/%d | %s |", comma(trial.Tier), trial.Label, mode, score.AnswerHits, score.QuestionCount, score.EvidenceHits, score.QuestionCount, strings.Join(score.Missed, ", ")))
+		}
+	}
+	return rows
+}
+
+func responseMetadataRows(trials []runner.Trial, chinese bool) []string {
+	if len(trials) == 0 {
+		return []string{"| — | — | — | — | — | — | — | — |"}
+	}
+	yes, no := "yes", "no"
+	if chinese {
+		yes, no = "是", "否"
+	}
+	rows := make([]string, 0, len(trials))
+	for _, trial := range trials {
+		summary := summarizeResponseMetadata(trial)
+		cached, reasoning, fallback := "—", "—", "—"
+		if summary.CachedTokens != nil {
+			cached = comma(*summary.CachedTokens)
+		}
+		if summary.ReasoningTokens != nil {
+			reasoning = comma(*summary.ReasoningTokens)
+		}
+		if summary.StructuredFallback != nil {
+			fallback = boolText(*summary.StructuredFallback, yes, no)
+		}
+		finish := summary.FinishReason
+		if chinese {
+			finish = chineseFinishReason(finish)
+		}
+		rows = append(rows, fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s | %s |", comma(trial.Tier), trial.Label, sanitizeCell(orDash(summary.Model)), sanitizeCell(orDash(finish)), cached, reasoning, fallback, boolText(summary.JSONRepaired, yes, no)))
+	}
+	return rows
+}
+
+func errorRows(trials []runner.Trial, chinese bool) []string {
+	var rows []string
+	for _, trial := range trials {
+		if trial.Score.State == "passed" && !trial.ContextTooLarge {
+			continue
+		}
+		detail, kind := errorDetail(trial), errorKind(trial)
+		if chinese {
+			kind = chineseErrorKind(kind)
+			detail.Message = chineseErrorMessage(detail.Code, detail.Message)
+			detail.Code = chineseErrorCode(detail.Code)
+		}
+		rows = append(rows, fmt.Sprintf("| %s | %s | %s | %s | %d | %s | %s |", comma(trial.Tier), trial.Label, kind, errorHTTPStatus(trial), trial.Attempts, sanitizeCell(detail.Code), sanitizeCell(detail.Message)))
+	}
+	if len(rows) == 0 {
+		if chinese {
+			return []string{"| — | — | 无 | — | 0 | — | 未检测到失败。 |"}
+		}
+		return []string{"| — | — | none | — | 0 | — | No failures detected. |"}
+	}
+	return rows
+}
+
+func trialRows(cfg config.Config, trials []runner.Trial, chinese bool) []string {
+	rows := make([]string, 0, len(trials))
+	for _, trial := range trials {
+		actual, output, total, recommended, outputLimit := "—", "—", "—", "—", "—"
+		if trial.PromptTokens != nil {
+			actual = formatK(*trial.PromptTokens)
+		}
+		if trial.CompletionTokens != nil {
+			output = formatK(*trial.CompletionTokens)
+		}
+		if input, out := trialUsage(trial); input != nil && out != nil {
+			total = formatK(*input + *out)
+		}
+		if calibration := calibrationForTrial(cfg, trials, trial); calibration != nil {
+			recommended = fmt.Sprintf("%.4f", calibration.RecommendedCharsPerToken)
+		}
+		if trial.MaxOutputTokensUsed > 0 {
+			outputLimit = comma(trial.MaxOutputTokensUsed)
+		}
+		result := trial.Score.State
+		if trial.ContextTooLarge {
+			result = "context limit"
+		}
+		score := fmt.Sprintf("%d/%d answers; %d/%d evidence", trial.Score.AnswerHits, trial.Score.QuestionCount, trial.Score.EvidenceHits, trial.Score.QuestionCount)
+		if chinese {
+			result = chineseTrialResult(trial)
+			score = fmt.Sprintf("%d/%d 答案；%d/%d 证据", trial.Score.AnswerHits, trial.Score.QuestionCount, trial.Score.EvidenceHits, trial.Score.QuestionCount)
+		}
+		if trial.Score.Repaired {
+			if chinese {
+				score += "；已修复 JSON"
+			} else {
+				score += "; repaired JSON"
+			}
+		}
+		rows = append(rows, fmt.Sprintf("| %s | %s | %.4f | %s | %s | %s | %s | %s | %s | %s |", comma(trial.Tier), trial.Label, trial.CharsPerTokenUsed, actual, output, total, recommended, outputLimit, result, score))
+	}
+	return rows
+}
+
 func Markdown(cfg config.Config, trials []runner.Trial, root string) string {
 	lines := []string{
 		"# Long-context benchmark result",
@@ -201,155 +336,19 @@ func Markdown(cfg config.Config, trials []runner.Trial, root string) string {
 	stats := Aggregate(trials)
 	lines = append(lines, "", "## Tier summary", "", "Totals include reported usage from all attempts; requests without usage may be omitted. Input and output averages describe final responses.", "", "| Tier | Status | Trials | Passed | Pass rate | Context limits | Failed | Input avg | Input median | Input range | Input total | Output avg | Output total | Total avg | Latency avg | Latency median | P95 |", "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
 	for _, stat := range stats {
-		inputAverage, inputMedian, inputRange := "—", "—", "—"
-		if stat.PromptTokensSamples > 0 {
-			inputAverage = formatK(int(stat.PromptTokensAverage))
-			inputMedian = formatK(stat.PromptTokensMedian)
-			inputRange = fmt.Sprintf("%s–%s", formatK(stat.PromptTokensMin), formatK(stat.PromptTokensMax))
-		}
-		outputAverage := "—"
-		inputTotal, outputTotal, totalAverage := "—", "—", "—"
-		if stat.CompletionTokensSamples > 0 {
-			outputAverage = formatK(int(stat.CompletionTokensAverage))
-		}
-		if stat.PromptTokensTotal > 0 {
-			inputTotal = formatK(stat.PromptTokensTotal)
-		}
-		if stat.CompletionTokensTotal > 0 {
-			outputTotal = formatK(stat.CompletionTokensTotal)
-		}
-		if stat.TotalTokensSamples > 0 {
-			totalAverage = formatK(int(stat.TotalTokensAverage))
-		}
-		lines = append(lines, fmt.Sprintf(
-			"| %s | %s | %d | %d | %.1f%% | %d | %d | %s | %s | %s | %s | %s | %s | %s | %.2fs | %.2fs | %.2fs |",
-			comma(stat.Tier),
-			stat.Status,
-			stat.Trials,
-			stat.Passed,
-			stat.PassRatePercent,
-			stat.ContextLimits,
-			stat.Failed,
-			inputAverage,
-			inputMedian,
-			inputRange,
-			outputAverage,
-			inputTotal,
-			outputTotal,
-			totalAverage,
-			stat.ElapsedSecondsAverage,
-			stat.ElapsedSecondsMedian,
-			stat.ElapsedSecondsP95,
-		))
+		lines = append(lines, tierSummaryRow(stat, stat.Status))
 	}
 	lines = append(lines, "", "## Response metadata", "", "| Tier | Trial | Model | Finish reason | Cached tokens | Reasoning tokens | Structured fallback | JSON repaired |", "|---:|---|---|---|---:|---:|---|---|")
-	if len(trials) == 0 {
-		lines = append(lines, "| — | — | — | — | — | — | — | — |")
-	}
-	for _, trial := range trials {
-		summary := summarizeResponseMetadata(trial)
-		cached, reasoning, fallback, repaired := "—", "—", "—", "no"
-		if summary.CachedTokens != nil {
-			cached = comma(*summary.CachedTokens)
-		}
-		if summary.ReasoningTokens != nil {
-			reasoning = comma(*summary.ReasoningTokens)
-		}
-		if summary.StructuredFallback != nil {
-			fallback = boolText(*summary.StructuredFallback, "yes", "no")
-		}
-		if summary.JSONRepaired {
-			repaired = "yes"
-		}
-		lines = append(lines, fmt.Sprintf(
-			"| %s | %s | %s | %s | %s | %s | %s | %s |",
-			comma(trial.Tier),
-			trial.Label,
-			sanitizeCell(orDash(summary.Model)),
-			sanitizeCell(orDash(summary.FinishReason)),
-			cached,
-			reasoning,
-			fallback,
-			repaired,
-		))
-	}
+	lines = append(lines, responseMetadataRows(trials, false)...)
+
 	lines = append(lines, "", "## Errors", "", "| Tier | Trial | Kind | HTTP | Attempts | Code | Message |", "|---:|---|---|---:|---:|---|---|")
-	errorRows := 0
-	for _, trial := range trials {
-		if trial.Score.State == "passed" && !trial.ContextTooLarge {
-			continue
-		}
-		detail := errorDetail(trial)
-		errorRows++
-		lines = append(lines, fmt.Sprintf(
-			"| %s | %s | %s | %s | %d | %s | %s |",
-			comma(trial.Tier),
-			trial.Label,
-			errorKind(trial),
-			errorHTTPStatus(trial),
-			trial.Attempts,
-			sanitizeCell(detail.Code),
-			sanitizeCell(detail.Message),
-		))
-	}
-	if errorRows == 0 {
-		lines = append(lines, "| — | — | none | — | 0 | — | No failures detected. |")
-	}
+	lines = append(lines, errorRows(trials, false)...)
+
 	lines = append(lines, "", "| Configured tier | Trial | CPT used | Actual input | Actual output | Actual total | Recommended CPT | Output limit | Result | Score |", "|---:|---|---:|---:|---:|---:|---:|---:|---|---|")
-	for _, trial := range trials {
-		actual, recommended := "—", "—"
-		actualOutput, actualTotal := "—", "—"
-		if trial.PromptTokens != nil {
-			actual = formatK(*trial.PromptTokens)
-		}
-		if trial.CompletionTokens != nil {
-			actualOutput = formatK(*trial.CompletionTokens)
-		}
-		if input, output := trialUsage(trial); input != nil && output != nil {
-			actualTotal = formatK(*input + *output)
-		}
-		if calibration := calibrationForTrial(cfg, trials, trial); calibration != nil {
-			recommended = fmt.Sprintf("%.4f", calibration.RecommendedCharsPerToken)
-		}
-		outputLimit := "—"
-		if trial.MaxOutputTokensUsed > 0 {
-			outputLimit = comma(trial.MaxOutputTokensUsed)
-		}
-		result := trial.Score.State
-		if trial.ContextTooLarge {
-			result = "context limit"
-		}
-		score := fmt.Sprintf("%d/%d answers; %d/%d evidence", trial.Score.AnswerHits, trial.Score.QuestionCount, trial.Score.EvidenceHits, trial.Score.QuestionCount)
-		if trial.Score.Repaired {
-			score += "; repaired JSON"
-		}
-		lines = append(lines, fmt.Sprintf("| %s | %s | %.4f | %s | %s | %s | %s | %s | %s | %s |", comma(trial.Tier), trial.Label, trial.CharsPerTokenUsed, actual, actualOutput, actualTotal, recommended, outputLimit, result, score))
-	}
+	lines = append(lines, trialRows(cfg, trials, false)...)
+
 	lines = append(lines, "", "## Mode breakdown", "", "| Tier | Trial | Mode | Answers | Evidence | Missed |", "|---:|---|---|---:|---:|---|")
-	for _, trial := range trials {
-		if len(trial.Score.ByMode) == 0 {
-			continue
-		}
-		modes := make([]string, 0, len(trial.Score.ByMode))
-		for mode := range trial.Score.ByMode {
-			modes = append(modes, mode)
-		}
-		sort.Strings(modes)
-		for _, mode := range modes {
-			modeScore := trial.Score.ByMode[mode]
-			lines = append(lines, fmt.Sprintf(
-				"| %s | %s | %s | %d/%d | %d/%d | %s |",
-				comma(trial.Tier),
-				trial.Label,
-				mode,
-				modeScore.AnswerHits,
-				modeScore.QuestionCount,
-				modeScore.EvidenceHits,
-				modeScore.QuestionCount,
-				strings.Join(modeScore.Missed, ", "),
-			))
-		}
-	}
+	lines = append(lines, modeBreakdownRows(trials)...)
 	return strings.Join(lines, "\n") + "\n"
 }
 
@@ -376,154 +375,20 @@ func MarkdownChinese(cfg config.Config, trials []runner.Trial, root string) stri
 	stats := Aggregate(trials)
 	lines = append(lines, "", "## 档位汇总", "", "总量包含各次尝试中接口返回的用量；未返回用量的请求可能未计入。输入和输出均值按最终响应计算。", "", "| 档位 | 状态 | 测试数 | 通过 | 通过率 | 上下限 | 失败 | 输入均值 | 输入中位数 | 输入范围 | 输入总量 | 输出均值 | 输出总量 | 总量均值 | 平均耗时 | 耗时中位数 | P95 |", "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
 	for _, stat := range stats {
-		inputAverage, inputMedian, inputRange := "—", "—", "—"
-		if stat.PromptTokensSamples > 0 {
-			inputAverage = formatK(int(stat.PromptTokensAverage))
-			inputMedian = formatK(stat.PromptTokensMedian)
-			inputRange = fmt.Sprintf("%s–%s", formatK(stat.PromptTokensMin), formatK(stat.PromptTokensMax))
-		}
-		outputAverage, inputTotal, outputTotal, totalAverage := "—", "—", "—", "—"
-		if stat.CompletionTokensSamples > 0 {
-			outputAverage = formatK(int(stat.CompletionTokensAverage))
-		}
-		if stat.PromptTokensTotal > 0 {
-			inputTotal = formatK(stat.PromptTokensTotal)
-		}
-		if stat.CompletionTokensTotal > 0 {
-			outputTotal = formatK(stat.CompletionTokensTotal)
-		}
-		if stat.TotalTokensSamples > 0 {
-			totalAverage = formatK(int(stat.TotalTokensAverage))
-		}
-		lines = append(lines, fmt.Sprintf(
-			"| %s | %s | %d | %d | %.1f%% | %d | %d | %s | %s | %s | %s | %s | %s | %s | %.2fs | %.2fs | %.2fs |",
-			comma(stat.Tier),
-			chineseTierStatus(stat.Status),
-			stat.Trials,
-			stat.Passed,
-			stat.PassRatePercent,
-			stat.ContextLimits,
-			stat.Failed,
-			inputAverage,
-			inputMedian,
-			inputRange,
-			inputTotal,
-			outputAverage,
-			outputTotal,
-			totalAverage,
-			stat.ElapsedSecondsAverage,
-			stat.ElapsedSecondsMedian,
-			stat.ElapsedSecondsP95,
-		))
+		lines = append(lines, tierSummaryRow(stat, chineseTierStatus(stat.Status)))
 	}
 
 	lines = append(lines, "", "## 响应元数据", "", "| 档位 | 测试 | 实际模型 | 结束原因 | 缓存 Token | 思考 Token | 结构化降级 | JSON 修复 |", "|---:|---|---|---|---:|---:|---|---|")
-	if len(trials) == 0 {
-		lines = append(lines, "| — | — | — | — | — | — | — | — |")
-	}
-	for _, trial := range trials {
-		summary := summarizeResponseMetadata(trial)
-		cached, reasoning, fallback, repaired := "—", "—", "—", "否"
-		if summary.CachedTokens != nil {
-			cached = comma(*summary.CachedTokens)
-		}
-		if summary.ReasoningTokens != nil {
-			reasoning = comma(*summary.ReasoningTokens)
-		}
-		if summary.StructuredFallback != nil {
-			fallback = boolText(*summary.StructuredFallback, "是", "否")
-		}
-		if summary.JSONRepaired {
-			repaired = "是"
-		}
-		lines = append(lines, fmt.Sprintf(
-			"| %s | %s | %s | %s | %s | %s | %s | %s |",
-			comma(trial.Tier),
-			trial.Label,
-			sanitizeCell(orDash(summary.Model)),
-			sanitizeCell(orDash(chineseFinishReason(summary.FinishReason))),
-			cached,
-			reasoning,
-			fallback,
-			repaired,
-		))
-	}
+	lines = append(lines, responseMetadataRows(trials, true)...)
 
 	lines = append(lines, "", "## 错误", "", "| 档位 | 测试 | 类型 | HTTP | 尝试次数 | 错误代码 | 错误消息 |", "|---:|---|---|---:|---:|---|---|")
-	errorRows := 0
-	for _, trial := range trials {
-		if trial.Score.State == "passed" && !trial.ContextTooLarge {
-			continue
-		}
-		detail := errorDetail(trial)
-		errorRows++
-		lines = append(lines, fmt.Sprintf(
-			"| %s | %s | %s | %s | %d | %s | %s |",
-			comma(trial.Tier),
-			trial.Label,
-			chineseErrorKind(errorKind(trial)),
-			errorHTTPStatus(trial),
-			trial.Attempts,
-			sanitizeCell(chineseErrorCode(detail.Code)),
-			sanitizeCell(chineseErrorMessage(detail.Code, detail.Message)),
-		))
-	}
-	if errorRows == 0 {
-		lines = append(lines, "| — | — | 无 | — | 0 | — | 未检测到失败。 |")
-	}
+	lines = append(lines, errorRows(trials, true)...)
 
 	lines = append(lines, "", "## 单次测试结果", "", "| 档位 | 测试 | CPT | 实际输入 | 实际输出 | 实际总量 | 建议 CPT | 输出上限 | 结果 | 得分 |", "|---:|---|---:|---:|---:|---:|---:|---:|---|---|")
-	for _, trial := range trials {
-		actual, recommended := "—", "—"
-		actualOutput, actualTotal := "—", "—"
-		if trial.PromptTokens != nil {
-			actual = formatK(*trial.PromptTokens)
-		}
-		if trial.CompletionTokens != nil {
-			actualOutput = formatK(*trial.CompletionTokens)
-		}
-		if input, output := trialUsage(trial); input != nil && output != nil {
-			actualTotal = formatK(*input + *output)
-		}
-		if calibration := calibrationForTrial(cfg, trials, trial); calibration != nil {
-			recommended = fmt.Sprintf("%.4f", calibration.RecommendedCharsPerToken)
-		}
-		outputLimit := "—"
-		if trial.MaxOutputTokensUsed > 0 {
-			outputLimit = comma(trial.MaxOutputTokensUsed)
-		}
-		score := fmt.Sprintf("%d/%d 答案；%d/%d 证据", trial.Score.AnswerHits, trial.Score.QuestionCount, trial.Score.EvidenceHits, trial.Score.QuestionCount)
-		if trial.Score.Repaired {
-			score += "；已修复 JSON"
-		}
-		lines = append(lines, fmt.Sprintf("| %s | %s | %.4f | %s | %s | %s | %s | %s | %s | %s |", comma(trial.Tier), trial.Label, trial.CharsPerTokenUsed, actual, actualOutput, actualTotal, recommended, outputLimit, chineseTrialResult(trial), score))
-	}
+	lines = append(lines, trialRows(cfg, trials, true)...)
 
 	lines = append(lines, "", "## 分题型成绩", "", "| 档位 | 测试 | 题型 | 答案 | 证据 | 漏答 |", "|---:|---|---|---:|---:|---|")
-	for _, trial := range trials {
-		if len(trial.Score.ByMode) == 0 {
-			continue
-		}
-		modes := make([]string, 0, len(trial.Score.ByMode))
-		for mode := range trial.Score.ByMode {
-			modes = append(modes, mode)
-		}
-		sort.Strings(modes)
-		for _, mode := range modes {
-			modeScore := trial.Score.ByMode[mode]
-			lines = append(lines, fmt.Sprintf(
-				"| %s | %s | %s | %d/%d | %d/%d | %s |",
-				comma(trial.Tier),
-				trial.Label,
-				mode,
-				modeScore.AnswerHits,
-				modeScore.QuestionCount,
-				modeScore.EvidenceHits,
-				modeScore.QuestionCount,
-				strings.Join(modeScore.Missed, ", "),
-			))
-		}
-	}
+	lines = append(lines, modeBreakdownRows(trials)...)
 	return strings.Join(lines, "\n") + "\n"
 }
 

@@ -30,28 +30,43 @@ type ModeScore struct {
 	Missed        []string `json:"missed,omitempty"`
 }
 
+const (
+	StatePassed            = "passed"
+	StateRequestFailed     = "request_failed"
+	StateInvalidAnswerJSON = "invalid_answer_json"
+	StateScoredFailure     = "scored_failure"
+)
+
+type ResponseInput struct {
+	Text           string
+	HTTPStatus     int
+	TransportError string
+	ProviderError  bool
+	ErrorDetail    string
+}
+
 var evidenceID = regexp.MustCompile(`[a-z0-9]+([-_][a-z0-9]+)*`)
 
-func Response(corpusPath string, response map[string]any, evidenceTolerance int) Score {
+func Response(corpusPath string, response ResponseInput, evidenceTolerance int) Score {
 	expectedData, err := os.ReadFile(filepath.Join(corpusPath, "answers.private.json"))
 	if err != nil {
-		return Score{State: "request_failed", Detail: err.Error()}
+		return Score{State: StateRequestFailed, Detail: err.Error()}
 	}
 	expected := map[string]corpus.Answer{}
 	if err := json.Unmarshal(expectedData, &expected); err != nil {
-		return Score{State: "request_failed", Detail: err.Error()}
+		return Score{State: StateRequestFailed, Detail: err.Error()}
 	}
-	if status := intValue(response["http_status"]); status >= 400 || response["transport_error"] != nil || response["_provider_error"] == true {
-		detail := stringValue(response["error"])
+	if response.HTTPStatus >= 400 || response.TransportError != "" || response.ProviderError {
+		detail := response.ErrorDetail
 		if detail == "" {
-			detail = stringValue(response["transport_error"])
+			detail = response.TransportError
 		}
-		return Score{State: "request_failed", QuestionCount: len(expected), Detail: detail}
+		return Score{State: StateRequestFailed, QuestionCount: len(expected), Detail: detail}
 	}
 
-	actual, repaired, err := decodeAnswers(stringValue(response["_extracted_text"]))
+	actual, repaired, err := decodeAnswers(response.Text)
 	if err != nil {
-		return Score{State: "invalid_answer_json", QuestionCount: len(expected), Detail: err.Error()}
+		return Score{State: StateInvalidAnswerJSON, QuestionCount: len(expected), Detail: err.Error()}
 	}
 
 	answerHits, evidenceHits := 0, 0
@@ -100,11 +115,11 @@ func Response(corpusPath string, response map[string]any, evidenceTolerance int)
 		byMode[mode] = modeScore
 	}
 
-	state := "passed"
+	state := StatePassed
 	for _, modeScore := range byMode {
 		if modeScore.AnswerHits != modeScore.QuestionCount ||
 			modeScore.QuestionCount-modeScore.EvidenceHits > evidenceTolerance {
-			state = "scored_failure"
+			state = StateScoredFailure
 			break
 		}
 	}
@@ -251,34 +266,4 @@ func balanceDelimiters(text string) string {
 
 func normalize(value string) string {
 	return strings.ToLower(strings.Join(strings.Fields(value), " "))
-}
-
-func stringValue(value any) string {
-	if value == nil {
-		return ""
-	}
-	if text, ok := value.(string); ok {
-		return text
-	}
-	data, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Sprint(value)
-	}
-	return string(data)
-}
-
-func intValue(value any) int {
-	switch number := value.(type) {
-	case int:
-		return number
-	case int64:
-		return int(number)
-	case float64:
-		return int(number)
-	case json.Number:
-		result, _ := number.Int64()
-		return int(result)
-	default:
-		return 0
-	}
 }

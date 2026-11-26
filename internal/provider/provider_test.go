@@ -16,7 +16,7 @@ func TestSuccessfulHTTPResponseFailures(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) }))
 			defer server.Close()
 			result := Send(config.Config{BaseURL: server.URL, APIMode: "responses", Timeout: time.Second}, "", "", nil)
-			if result.Raw == nil || result.HTTPStatus != http.StatusOK || (result.TransportError == "" && result.Raw["_provider_error"] != true) {
+			if result.Raw == nil || result.HTTPStatus != http.StatusOK || (result.TransportError == "" && !result.ProviderError) {
 				t.Fatalf("failure not classified: %#v", result)
 			}
 		})

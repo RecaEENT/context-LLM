@@ -144,6 +144,43 @@ func TestAggregateSummarizesRepeatedTrials(t *testing.T) {
 	}
 }
 
+func TestTierSummaryColumnsMatchHeaders(t *testing.T) {
+	input, output := 100000, 2000
+	trials := []runner.Trial{{Tier: 200000, PromptTokens: &input, CompletionTokens: &output, Score: scoring.Score{State: "passed"}}}
+	for _, tc := range []struct {
+		name, header, inputColumn, outputColumn string
+		render                                  func(config.Config, []runner.Trial, string) string
+	}{
+		{"English", "| Tier | Status |", "Input total", "Output avg", Markdown},
+		{"Chinese", "| 档位 | 状态 |", "输入总量", "输出均值", MarkdownChinese},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := strings.Split(tc.render(config.Config{}, trials, "run"), "\n")
+			for i, line := range lines {
+				if !strings.HasPrefix(line, tc.header) {
+					continue
+				}
+				headers := strings.Split(strings.Trim(line, "|"), "|")
+				values := strings.Split(strings.Trim(lines[i+2], "|"), "|")
+				for index, header := range headers {
+					switch strings.TrimSpace(header) {
+					case tc.inputColumn:
+						if strings.TrimSpace(values[index]) != "100.0K" {
+							t.Fatalf("incorrect input total: %s", lines[i+2])
+						}
+					case tc.outputColumn:
+						if strings.TrimSpace(values[index]) != "2.0K" {
+							t.Fatalf("incorrect output average: %s", lines[i+2])
+						}
+					}
+				}
+				return
+			}
+			t.Fatal("tier summary not found")
+		})
+	}
+}
+
 func TestAggregateIncludesAllReportedAttempts(t *testing.T) {
 	prompt, output := 100, 10
 	trial := runner.Trial{Tier: 200000, PromptTokens: &prompt, CompletionTokens: &output,

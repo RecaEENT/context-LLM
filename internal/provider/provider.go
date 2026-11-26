@@ -23,6 +23,7 @@ type Result struct {
 	Text                     string
 	HTTPStatus               int
 	TransportError           string
+	ProviderError            bool
 	Retryable                bool
 	RetryAfter               time.Duration
 	RetryClass               string
@@ -90,7 +91,7 @@ func sendWithStructuredOutput(cfg config.Config, userInput string, structured bo
 			raw["error"] = "provider reported a failed response"
 		}
 		raw["_provider_error"] = true
-		return Result{Raw: raw, HTTPStatus: httpResult.StatusCode, RetryClass: "provider_error", StructuredOutput: structured}
+		return Result{Raw: raw, HTTPStatus: httpResult.StatusCode, ProviderError: true, RetryClass: "provider_error", StructuredOutput: structured}
 	}
 	return Result{Raw: raw, Text: responseText(raw), HTTPStatus: httpResult.StatusCode, StructuredOutput: structured}
 }
@@ -158,6 +159,10 @@ func (result Result) PromptTokens() *int {
 
 func (result Result) CompletionTokens() *int {
 	return usageToken(result.Raw, "completion_tokens", "output_tokens")
+}
+
+func (result Result) ErrorDetail() string {
+	return stringValue(result.Raw["error"])
 }
 
 func (result Result) FinishReason() string {
