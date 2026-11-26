@@ -13,7 +13,7 @@ import (
 	"context-LLM/internal/config"
 )
 
-const checkpointVersion = 1
+const checkpointVersion = 2
 
 type Checkpoint struct {
 	Version         int     `json:"version"`
@@ -26,6 +26,7 @@ type Checkpoint struct {
 	BinaryHigh      int     `json:"binary_high"`
 	ProbeHigh       int     `json:"probe_high"`
 	ProbeCount      int     `json:"probe_count"`
+	CharsPerToken   float64 `json:"chars_per_token"`
 	Trials          []Trial `json:"trials"`
 }
 
@@ -44,6 +45,7 @@ func ConfigSignature(cfg config.Config) string {
 		AutoCalibrate         bool     `json:"auto_calibrate"`
 		EnhancedAutoTest      bool     `json:"enhanced_auto_test"`
 		BinaryPrecisionTokens int      `json:"binary_precision_tokens"`
+		StructuredOutput      bool     `json:"structured_output"`
 		ParallelTests         bool     `json:"parallel_tests"`
 		RequestIntervalMS     int      `json:"request_interval_ms"`
 		AnchorCount           int      `json:"anchor_count"`
@@ -65,6 +67,7 @@ func ConfigSignature(cfg config.Config) string {
 		AutoCalibrate:         cfg.AutoCalibrate,
 		EnhancedAutoTest:      cfg.EnhancedAutoTest,
 		BinaryPrecisionTokens: cfg.BinaryPrecisionTokens,
+		StructuredOutput:      cfg.StructuredOutput,
 		ParallelTests:         cfg.ParallelTests,
 		RequestIntervalMS:     cfg.RequestIntervalMS,
 		AnchorCount:           cfg.AnchorCount,

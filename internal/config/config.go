@@ -112,7 +112,7 @@ func Load(path string, requireKey bool) (Config, error) {
 		return Config{}, err
 	}
 	chars, err := strconv.ParseFloat(defaultString(bench["chars_per_token"], "6.25"), 64)
-	if err != nil || chars <= 0 {
+	if err != nil || math.IsNaN(chars) || math.IsInf(chars, 0) || chars <= 0 {
 		return Config{}, errors.New("chars_per_token must be a positive number")
 	}
 	maxOutput, err := strconv.Atoi(defaultString(bench["max_output_tokens"], "2500"))

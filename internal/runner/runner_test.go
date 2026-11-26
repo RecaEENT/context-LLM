@@ -2,6 +2,8 @@ package runner
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -142,6 +144,83 @@ func TestCheckpointRoundTripAndConfigGuard(t *testing.T) {
 	changed.Model = "model-b"
 	if _, err := LoadCheckpoint(path, changed); err == nil {
 		t.Fatal("expected changed config to be rejected")
+	}
+	changed = cfg
+	changed.StructuredOutput = !cfg.StructuredOutput
+	if _, err := LoadCheckpoint(path, changed); err == nil {
+		t.Fatal("expected structured output change to be rejected")
+	}
+}
+
+func TestResumeRestoresCalibrationAndStopsOnRequestFailure(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"invalid api key"}`)
+	}))
+	defer server.Close()
+	cfg := config.Config{BaseURL: server.URL, Model: "test", APIKey: "key", APIMode: "chat-completions", Tiers: []int{13000, 14000}, CharsPerToken: 6.25, MaxOutputTokens: 2500, Timeout: time.Second, AutoCalibrate: true, EnhancedAutoTest: true, AnchorCount: 13, TestModes: []string{"needle"}}
+	root := t.TempDir()
+	r := New(cfg, root, io.Discard)
+	r.SetCheckpointPath(filepath.Join(root, "checkpoint.json"))
+	state := r.newCheckpoint("configured")
+	state.TierIndex = 1
+	state.LastPassed = 13000
+	r.Config.CharsPerToken = 4.5
+	if err := r.saveCheckpoint(state); err != nil {
+		t.Fatal(err)
+	}
+	resumed := New(cfg, root, io.Discard)
+	resumed.SetCheckpointPath(filepath.Join(root, "checkpoint.json"))
+	trials, err := resumed.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 || len(trials) != 1 || trials[0].Score.State != "request_failed" {
+		t.Fatalf("request failure should stop without binary search: requests=%d trials=%#v", requests, trials)
+	}
+	if trials[0].CharsPerTokenUsed != 4.5 {
+		t.Fatalf("calibration was not restored: %v", trials[0].CharsPerTokenUsed)
+	}
+	loaded, err := LoadCheckpoint(filepath.Join(root, "checkpoint.json"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Complete || loaded.BinaryHigh != 0 {
+		t.Fatalf("unexpected checkpoint: %#v", loaded)
+	}
+}
+
+func TestEnhancedStopsOnFailedResponseWithHTTP200(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = io.WriteString(w, `{"status":"failed","error":{"code":"server_error","message":"unavailable"}}`)
+	}))
+	defer server.Close()
+	cfg := config.Config{BaseURL: server.URL, Model: "test", APIKey: "key", APIMode: "responses", Tiers: []int{13000, 14000}, CharsPerToken: 1, MaxOutputTokens: 2500, Timeout: time.Second, EnhancedAutoTest: true, AnchorCount: 13, TestModes: []string{"needle"}}
+	root := t.TempDir()
+	r := New(cfg, root, io.Discard)
+	r.SetCheckpointPath(filepath.Join(root, "checkpoint.json"))
+	state := r.newCheckpoint("binary")
+	state.BinaryLow, state.BinaryHigh = 13000, 40000
+	if err := r.saveCheckpoint(state); err != nil {
+		t.Fatal(err)
+	}
+	trials, err := r.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 || len(trials) != 1 || trials[0].Score.State != "request_failed" || trials[0].HTTPStatus != http.StatusOK {
+		t.Fatalf("failed response misclassified: requests=%d trials=%#v", requests, trials)
+	}
+	loaded, err := LoadCheckpoint(filepath.Join(root, "checkpoint.json"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.BinaryLow != 13000 || loaded.BinaryHigh != 40000 {
+		t.Fatalf("failure changed bounds: %#v", loaded)
 	}
 }
 

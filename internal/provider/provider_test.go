@@ -1,12 +1,45 @@
 package provider
 
 import (
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"context-LLM/internal/config"
 )
+
+func TestSuccessfulHTTPResponseFailures(t *testing.T) {
+	for _, body := range []string{`null`, `{"status":"failed","error":{"code":"server_error","message":"unavailable"}}`, `{"error":{"message":"unavailable"}}`} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) }))
+			defer server.Close()
+			result := Send(config.Config{BaseURL: server.URL, APIMode: "responses", Timeout: time.Second}, "", "", nil)
+			if result.Raw == nil || result.HTTPStatus != http.StatusOK || (result.TransportError == "" && result.Raw["_provider_error"] != true) {
+				t.Fatalf("failure not classified: %#v", result)
+			}
+		})
+	}
+}
+
+func TestStructuredFallbackRunsRequestHookTwice(t *testing.T) {
+	requests, hooks := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":"response_format unsupported"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[]}`)
+	}))
+	defer server.Close()
+	result := Send(config.Config{BaseURL: server.URL, APIMode: "chat-completions", StructuredOutput: true, Timeout: time.Second}, "", "", func() { hooks++ })
+	if !result.StructuredOutputFallback || requests != 2 || hooks != 2 {
+		t.Fatalf("requests=%d hooks=%d result=%#v", requests, hooks, result)
+	}
+}
 
 func TestResponseTextForChatCompletions(t *testing.T) {
 	response := map[string]any{

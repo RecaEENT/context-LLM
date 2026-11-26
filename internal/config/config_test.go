@@ -72,6 +72,26 @@ func TestPlaceholderAPIKeyIsRejectedForRealRuns(t *testing.T) {
 	}
 }
 
+func TestCharsPerTokenRejectsNonFiniteValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.txt")
+	if err := WriteDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"NaN", "+Inf", "-Inf"} {
+		updated := strings.Replace(string(data), "chars_per_token    = 6.25", "chars_per_token    = "+value, 1)
+		if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path, false); err == nil {
+			t.Errorf("accepted %s", value)
+		}
+	}
+}
+
 func TestParseTestModesRejectsUnknownMode(t *testing.T) {
 	if _, err := parseTestModes("needle,unknown"); err == nil {
 		t.Fatal("expected unknown mode to fail")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -29,6 +30,8 @@ type ModeScore struct {
 	Missed        []string `json:"missed,omitempty"`
 }
 
+var evidenceID = regexp.MustCompile(`[a-z0-9]+([-_][a-z0-9]+)*`)
+
 func Response(corpusPath string, response map[string]any, evidenceTolerance int) Score {
 	expectedData, err := os.ReadFile(filepath.Join(corpusPath, "answers.private.json"))
 	if err != nil {
@@ -38,7 +41,7 @@ func Response(corpusPath string, response map[string]any, evidenceTolerance int)
 	if err := json.Unmarshal(expectedData, &expected); err != nil {
 		return Score{State: "request_failed", Detail: err.Error()}
 	}
-	if status := intValue(response["http_status"]); status >= 400 || response["transport_error"] != nil {
+	if status := intValue(response["http_status"]); status >= 400 || response["transport_error"] != nil || response["_provider_error"] == true {
 		detail := stringValue(response["error"])
 		if detail == "" {
 			detail = stringValue(response["transport_error"])
@@ -69,8 +72,16 @@ func Response(corpusPath string, response map[string]any, evidenceTolerance int)
 		modeScore.QuestionCount++
 		answerOK := normalize(found.Answer) == normalize(truth.Answer)
 		evidenceOK := true
+		foundIDs := evidenceID.FindAllString(normalize(found.Evidence), -1)
 		for _, required := range strings.Split(normalize(truth.Evidence), " and ") {
-			if !strings.Contains(normalize(found.Evidence), required) {
+			matched := false
+			for _, id := range foundIDs {
+				if id == required {
+					matched = true
+					break
+				}
+			}
+			if !matched {
 				evidenceOK = false
 			}
 		}

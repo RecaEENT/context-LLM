@@ -144,6 +144,20 @@ func TestAggregateSummarizesRepeatedTrials(t *testing.T) {
 	}
 }
 
+func TestAggregateIncludesAllReportedAttempts(t *testing.T) {
+	prompt, output := 100, 10
+	trial := runner.Trial{Tier: 200000, PromptTokens: &prompt, CompletionTokens: &output,
+		ResponseAttemptMetadata: []map[string]any{
+			{"usage": map[string]any{"prompt_tokens": float64(100), "completion_tokens": float64(50)}},
+			{"usage": map[string]any{"prompt_tokens": float64(100), "completion_tokens": float64(10)}},
+		},
+	}
+	stat := Aggregate([]runner.Trial{trial})[0]
+	if stat.PromptTokensTotal != 200 || stat.CompletionTokensTotal != 60 || stat.TotalTokensTotal != 260 || stat.PromptTokensAverage != 100 {
+		t.Fatalf("incorrect attempt totals: %#v", stat)
+	}
+}
+
 func TestMarkdownIncludesResponseMetadata(t *testing.T) {
 	cfg := config.Config{TestModes: []string{"needle"}}
 	trial := runner.Trial{

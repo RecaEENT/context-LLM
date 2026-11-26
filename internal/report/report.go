@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"context-LLM/internal/config"
+	"context-LLM/internal/provider"
 	"context-LLM/internal/runner"
 )
 
@@ -44,6 +45,34 @@ type UsageEstimate struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
 	TotalTokens  int `json:"total_tokens"`
+}
+
+// Some failed requests omit usage, so reported totals can be lower than billing.
+func trialUsage(trial runner.Trial) (*int, *int) {
+	if len(trial.ResponseAttemptMetadata) == 0 {
+		return trial.PromptTokens, trial.CompletionTokens
+	}
+	var input, output int
+	var hasInput, hasOutput bool
+	for _, metadata := range trial.ResponseAttemptMetadata {
+		result := provider.Result{Raw: metadata}
+		if value := result.PromptTokens(); value != nil {
+			input += *value
+			hasInput = true
+		}
+		if value := result.CompletionTokens(); value != nil {
+			output += *value
+			hasOutput = true
+		}
+	}
+	var inputPtr, outputPtr *int
+	if hasInput {
+		inputPtr = &input
+	}
+	if hasOutput {
+		outputPtr = &output
+	}
+	return inputPtr, outputPtr
 }
 
 type responseMetadataSummary struct {
@@ -170,7 +199,7 @@ func Markdown(cfg config.Config, trials []runner.Trial, root string) string {
 		}
 	}
 	stats := Aggregate(trials)
-	lines = append(lines, "", "## Tier summary", "", "| Tier | Status | Trials | Passed | Pass rate | Context limits | Failed | Input avg | Input median | Input range | Input total | Output avg | Output total | Total avg | Latency avg | Latency median | P95 |", "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
+	lines = append(lines, "", "## Tier summary", "", "Totals include reported usage from all attempts; requests without usage may be omitted. Input and output averages describe final responses.", "", "| Tier | Status | Trials | Passed | Pass rate | Context limits | Failed | Input avg | Input median | Input range | Input total | Output avg | Output total | Total avg | Latency avg | Latency median | P95 |", "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
 	for _, stat := range stats {
 		inputAverage, inputMedian, inputRange := "—", "—", "—"
 		if stat.PromptTokensSamples > 0 {
@@ -276,8 +305,8 @@ func Markdown(cfg config.Config, trials []runner.Trial, root string) string {
 		if trial.CompletionTokens != nil {
 			actualOutput = formatK(*trial.CompletionTokens)
 		}
-		if trial.PromptTokens != nil && trial.CompletionTokens != nil {
-			actualTotal = formatK(*trial.PromptTokens + *trial.CompletionTokens)
+		if input, output := trialUsage(trial); input != nil && output != nil {
+			actualTotal = formatK(*input + *output)
 		}
 		if calibration := calibrationForTrial(cfg, trials, trial); calibration != nil {
 			recommended = fmt.Sprintf("%.4f", calibration.RecommendedCharsPerToken)
@@ -345,7 +374,7 @@ func MarkdownChinese(cfg config.Config, trials []runner.Trial, root string) stri
 	}
 
 	stats := Aggregate(trials)
-	lines = append(lines, "", "## 档位汇总", "", "| 档位 | 状态 | 测试数 | 通过 | 通过率 | 上下限 | 失败 | 输入均值 | 输入中位数 | 输入范围 | 输入总量 | 输出均值 | 输出总量 | 总量均值 | 平均耗时 | 耗时中位数 | P95 |", "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
+	lines = append(lines, "", "## 档位汇总", "", "总量包含各次尝试中接口返回的用量；未返回用量的请求可能未计入。输入和输出均值按最终响应计算。", "", "| 档位 | 状态 | 测试数 | 通过 | 通过率 | 上下限 | 失败 | 输入均值 | 输入中位数 | 输入范围 | 输入总量 | 输出均值 | 输出总量 | 总量均值 | 平均耗时 | 耗时中位数 | P95 |", "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
 	for _, stat := range stats {
 		inputAverage, inputMedian, inputRange := "—", "—", "—"
 		if stat.PromptTokensSamples > 0 {
@@ -453,8 +482,8 @@ func MarkdownChinese(cfg config.Config, trials []runner.Trial, root string) stri
 		if trial.CompletionTokens != nil {
 			actualOutput = formatK(*trial.CompletionTokens)
 		}
-		if trial.PromptTokens != nil && trial.CompletionTokens != nil {
-			actualTotal = formatK(*trial.PromptTokens + *trial.CompletionTokens)
+		if input, output := trialUsage(trial); input != nil && output != nil {
+			actualTotal = formatK(*input + *output)
 		}
 		if calibration := calibrationForTrial(cfg, trials, trial); calibration != nil {
 			recommended = fmt.Sprintf("%.4f", calibration.RecommendedCharsPerToken)
@@ -821,6 +850,8 @@ func Aggregate(trials []runner.Trial) []TierStats {
 		completionValues := []int{}
 		totalValues := []int{}
 		elapsedValues := []float64{}
+		inputTotals := []int{}
+		outputTotals := []int{}
 		for _, trial := range group {
 			if !trial.ContextTooLarge && trial.Score.State == "passed" {
 				stat.Passed++
@@ -835,8 +866,15 @@ func Aggregate(trials []runner.Trial) []TierStats {
 			if trial.CompletionTokens != nil && *trial.CompletionTokens > 0 {
 				completionValues = append(completionValues, *trial.CompletionTokens)
 			}
-			if trial.PromptTokens != nil && trial.CompletionTokens != nil && *trial.PromptTokens > 0 && *trial.CompletionTokens > 0 {
-				totalValues = append(totalValues, *trial.PromptTokens+*trial.CompletionTokens)
+			input, output := trialUsage(trial)
+			if input != nil {
+				inputTotals = append(inputTotals, *input)
+			}
+			if output != nil {
+				outputTotals = append(outputTotals, *output)
+			}
+			if input != nil && output != nil {
+				totalValues = append(totalValues, *input+*output)
 			}
 			elapsedValues = append(elapsedValues, trial.ElapsedSeconds)
 		}
@@ -849,13 +887,13 @@ func Aggregate(trials []runner.Trial) []TierStats {
 			stat.PromptTokensMedian = promptValues[len(promptValues)/2]
 			stat.PromptTokensMin = promptValues[0]
 			stat.PromptTokensMax = promptValues[len(promptValues)-1]
-			stat.PromptTokensTotal = sumInts(promptValues)
 		}
 		stat.CompletionTokensSamples = len(completionValues)
 		if len(completionValues) > 0 {
 			stat.CompletionTokensAverage = averageInts(completionValues)
-			stat.CompletionTokensTotal = sumInts(completionValues)
 		}
+		stat.PromptTokensTotal = sumInts(inputTotals)
+		stat.CompletionTokensTotal = sumInts(outputTotals)
 		stat.TotalTokensSamples = len(totalValues)
 		if len(totalValues) > 0 {
 			stat.TotalTokensTotal = sumInts(totalValues)

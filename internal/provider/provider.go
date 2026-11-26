@@ -30,12 +30,12 @@ type Result struct {
 	StructuredOutputFallback bool
 }
 
-func Send(cfg config.Config, material, questions string) Result {
+func Send(cfg config.Config, material, questions string, beforeRequest func()) Result {
 	userInput := "CORPUS START\n" + material + "\nCORPUS END\nQUESTIONS\n" + questions
-	return sendWithStructuredOutput(cfg, userInput, cfg.StructuredOutput)
+	return sendWithStructuredOutput(cfg, userInput, cfg.StructuredOutput, beforeRequest)
 }
 
-func sendWithStructuredOutput(cfg config.Config, userInput string, structured bool) Result {
+func sendWithStructuredOutput(cfg config.Config, userInput string, structured bool, beforeRequest func()) Result {
 	endpoint, payload := buildPayload(cfg, userInput, structured)
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -48,6 +48,9 @@ func sendWithStructuredOutput(cfg config.Config, userInput string, structured bo
 	request.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	request.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: cfg.Timeout}
+	if beforeRequest != nil {
+		beforeRequest()
+	}
 	httpResult, err := client.Do(request)
 	if err != nil {
 		return Result{Raw: map[string]any{"transport_error": "TransportError", "error": err.Error()}, TransportError: "TransportError", Retryable: true, RetryClass: "transport"}
@@ -60,7 +63,7 @@ func sendWithStructuredOutput(cfg config.Config, userInput string, structured bo
 	if httpResult.StatusCode >= 400 {
 		body := string(data)
 		if structured && structuredOutputUnsupported(httpResult.StatusCode, body) {
-			fallback := sendWithStructuredOutput(cfg, userInput, false)
+			fallback := sendWithStructuredOutput(cfg, userInput, false, beforeRequest)
 			fallback.StructuredOutput = false
 			fallback.StructuredOutputFallback = true
 			if fallback.Raw == nil {
@@ -76,7 +79,18 @@ func sendWithStructuredOutput(cfg config.Config, userInput string, structured bo
 	}
 	raw := map[string]any{}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return Result{Raw: map[string]any{"transport_error": "DecodeError", "error": err.Error()}, TransportError: "DecodeError", RetryClass: "decode_error"}
+		return Result{Raw: map[string]any{"transport_error": "DecodeError", "error": err.Error()}, HTTPStatus: httpResult.StatusCode, TransportError: "DecodeError", RetryClass: "decode_error"}
+	}
+	if raw == nil {
+		return Result{Raw: map[string]any{"transport_error": "DecodeError", "error": "response must be a JSON object"}, HTTPStatus: httpResult.StatusCode, TransportError: "DecodeError", RetryClass: "decode_error"}
+	}
+	status, _ := raw["status"].(string)
+	if strings.EqualFold(status, "failed") || raw["error"] != nil {
+		if raw["error"] == nil {
+			raw["error"] = "provider reported a failed response"
+		}
+		raw["_provider_error"] = true
+		return Result{Raw: raw, HTTPStatus: httpResult.StatusCode, RetryClass: "provider_error", StructuredOutput: structured}
 	}
 	return Result{Raw: raw, Text: responseText(raw), HTTPStatus: httpResult.StatusCode, StructuredOutput: structured}
 }

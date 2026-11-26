@@ -85,6 +85,7 @@ func (runner *Runner) saveCheckpoint(checkpoint Checkpoint) error {
 		return nil
 	}
 	checkpoint.ConfigSignature = runner.configSignature
+	checkpoint.CharsPerToken = runner.Config.CharsPerToken
 	return SaveCheckpoint(runner.checkpointPath, checkpoint)
 }
 
@@ -137,6 +138,9 @@ func (runner *Runner) Run() ([]Trial, error) {
 				return nil, loadErr
 			}
 			checkpoint = &loaded
+			if loaded.CharsPerToken > 0 {
+				runner.Config.CharsPerToken = loaded.CharsPerToken
+			}
 		} else if !os.IsNotExist(err) {
 			return nil, err
 		}
@@ -236,6 +240,17 @@ type tierOutcome struct {
 	trials          []Trial
 	passed          bool
 	contextTooLarge bool
+	requestFailed   bool
+}
+
+func (runner *Runner) stopOnRequestFailure(state *Checkpoint, outcome tierOutcome) (bool, error) {
+	if !outcome.requestFailed {
+		return false, nil
+	}
+	fmt.Fprintln(runner.Out, "Stopping enhanced test: a request failed; no context bound can be inferred from this failure.")
+	state.Phase = "done"
+	state.Complete = true
+	return true, runner.saveCheckpoint(*state)
 }
 
 func (runner *Runner) runEnhanced(checkpoint *Checkpoint) ([]Trial, error) {
@@ -275,6 +290,9 @@ func (runner *Runner) runEnhanced(checkpoint *Checkpoint) ([]Trial, error) {
 		fmt.Fprintf(runner.Out, "Enhanced test: %s context tier, 3 independent question sets …\n", comma(tier))
 		outcome, err := runner.runTier(tier, "primary", &state)
 		if err != nil {
+			return state.Trials, err
+		}
+		if stopped, err := runner.stopOnRequestFailure(&state, outcome); stopped {
 			return state.Trials, err
 		}
 		runner.applyTrialSetCalibration(tier, outcome.trials)
@@ -320,6 +338,9 @@ func (runner *Runner) runProbe(state *Checkpoint) ([]Trial, error) {
 		if err != nil {
 			return state.Trials, err
 		}
+		if stopped, err := runner.stopOnRequestFailure(state, outcome); stopped {
+			return state.Trials, err
+		}
 		runner.applyTrialSetCalibration(state.ProbeHigh, outcome.trials)
 		if !outcome.passed {
 			state.Phase = "binary"
@@ -362,6 +383,9 @@ func (runner *Runner) runBinarySearch(state *Checkpoint) ([]Trial, error) {
 		if err != nil {
 			return state.Trials, err
 		}
+		if stopped, err := runner.stopOnRequestFailure(state, outcome); stopped {
+			return state.Trials, err
+		}
 		runner.applyTrialSetCalibration(mid, outcome.trials)
 		if outcome.passed {
 			state.BinaryLow = mid
@@ -399,6 +423,10 @@ func (runner *Runner) runTier(tier int, label string, state *Checkpoint) (tierOu
 		if trial.Score.State != "passed" {
 			outcome.passed = false
 		}
+		if trial.Score.State == "request_failed" && !trial.ContextTooLarge {
+			outcome.requestFailed = true
+			break
+		}
 	}
 	return outcome, nil
 }
@@ -430,6 +458,9 @@ func (runner *Runner) runTierParallel(tier int, label string, state *Checkpoint)
 		}
 		if trial.Score.State != "passed" {
 			outcome.passed = false
+		}
+		if trial.Score.State == "request_failed" && !trial.ContextTooLarge {
+			outcome.requestFailed = true
 		}
 	}
 	return outcome, nil
@@ -466,9 +497,15 @@ func (runner *Runner) runTrial(tier int, label string) (Trial, error) {
 		for {
 			requestConfig := runner.Config
 			requestConfig.MaxOutputTokens = outputLimit
-			runner.throttle()
 			started := time.Now()
-			result = provider.Send(requestConfig, string(material), string(questions))
+			firstRequest := true
+			result = provider.Send(requestConfig, string(material), string(questions), func() {
+				runner.throttle()
+				if firstRequest {
+					started = time.Now()
+					firstRequest = false
+				}
+			})
 			result.Raw["_benchmark"] = manifest
 			result.Raw["_request"] = map[string]string{
 				"base_url":          runner.Config.BaseURL,

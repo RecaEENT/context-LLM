@@ -101,7 +101,7 @@ The configuration file supports Chinese comments: full-line comments start with 
 | Setting | Default | Description |
 |---|---|---|
 | `tiers` | `200K, 400K, 600K, 800K, 1M` | Test tiers; supports plain numbers, K, M, and decimals |
-| `chars_per_token` | `6.25` | Initial input estimate, later calibrated from actual usage |
+| `chars_per_token` | `6.25` | Initial input estimate; must be a finite positive number and is later calibrated from actual usage |
 | `max_output_tokens` | `2500` | Minimum output budget; expanded automatically by anchor count |
 | `timeout_seconds` | `900` | Per-request timeout |
 | `transport_retries` | `1` | Extra retries for network, HTTP 408, ordinary 429, and recoverable 5xx failures |
@@ -123,7 +123,7 @@ All tiers are converted to integer tokens and validated as unique, ascending, an
 | `binary_precision_tokens` | `10000` | Enhanced-mode binary-search precision in tokens; smaller is more precise |
 | `structured_output` | `true` | Prefer JSON constraints and fall back automatically when unsupported |
 | `parallel_tests` | `false` | Enhanced mode only; run the three same-tier trials concurrently |
-| `request_interval_ms` | `0` | Global request start interval; `0` means unlimited |
+| `request_interval_ms` | `0` | Global request start interval, including retries and structured-output fallback; `0` means unlimited |
 
 Normal mode keeps single-run tests with actual-token calibration. Enhanced mode always runs three trials per tier with newly generated questions and calibrates from the median input-token count.
 
@@ -145,6 +145,8 @@ Available modes:
 | `adversarial` | Resisting similar incorrect information |
 
 An abstention question for insufficient material is always included.
+
+Evidence is matched by complete record ID, ignoring case; surrounding text and punctuation are allowed. For example, `ND-01` does not match `ND-010` or `wrong-ND-01`. When multiple records are required, each ID must be present.
 
 ### Output And Preview
 
@@ -171,6 +173,8 @@ Set `enhanced_auto_test = true` to enable; every run generates a new question se
 3. Binary search between the passing and failing tiers using `binary_precision_tokens`, defaulting to 10000 tokens.
 4. Additional upward probes if every configured tier passes.
 
+Request failures other than context-limit errors, including authentication, quota, and network failures, stop the enhanced test and retain the report. They are not used as binary-search boundaries. Start a new run after resolving the error.
+
 ### Request Reliability
 
 - `transport_retries` controls extra attempts for network failures, HTTP `408`, ordinary `429`, and recoverable `5xx` responses.
@@ -178,6 +182,7 @@ Set `enhanced_auto_test = true` to enable; every run generates a new question se
 - `Retry-After` is honored, including longer cooldown delays.
 - A standalone `usage_limit_reached` error stops immediately instead of retrying blindly.
 - Context-limit, authentication, and ordinary parameter errors are not retried.
+- An HTTP `200` response containing a provider error or failed status is treated as a request failure; invalid responses such as JSON `null` are also recorded as errors.
 - Unsupported structured-output fields fall back automatically and are recorded.
 - JSON output can be extracted and repaired for code fences, trailing commas, and missing delimiters.
 - `max_output_tokens` is a minimum budget; a `finish_reason=length` response triggers one automatic expansion.
@@ -202,6 +207,8 @@ After testing, `RESULTS.md` includes:
 - Recommended `chars_per_token` for the next run (the median in enhanced mode)
 
 Write the recommended value back to `chars_per_token` to reduce input-token estimation drift in the next run.
+
+Usage totals include reported usage from retries and output expansions. If a provider omits usage for a request, actual billing may be higher. Individual input and output values describe the final response.
 
 ## Result Files
 
@@ -239,6 +246,8 @@ Resume a specific run directory:
 ```
 
 Resume validates the configuration fingerprint. The checkpoint updates after every trial; completed trials are reused and only missing trials are rerun. Tier progress, probe state, binary-search bounds, completed attempt counts, and response metadata are also preserved.
+
+Checkpoints preserve the active calibration. Version 1 checkpoints lack the necessary state and cannot be resumed by this version; start a new run instead.
 
 ## Verification
 

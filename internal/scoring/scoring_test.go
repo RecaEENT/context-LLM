@@ -33,6 +33,30 @@ func TestGeneratedCorpusScoresPerfectResponse(t *testing.T) {
 	}
 }
 
+func TestEvidenceRequiresCompleteRecordID(t *testing.T) {
+	root := t.TempDir()
+	if _, err := corpus.Generate(root, 13000, 42, 1, 13, []string{"needle"}); err != nil {
+		t.Fatal(err)
+	}
+	answers := readAnswers(t, root)
+	for _, value := range []string{"ND-010", "wrong-ND-01"} {
+		answer := answers["Q01"]
+		answer.Evidence = value
+		answers["Q01"] = answer
+		data, _ := json.Marshal(answers)
+		if score := Response(root, map[string]any{"_extracted_text": string(data)}, 0); score.State != "scored_failure" {
+			t.Fatalf("incorrect evidence %q passed: %#v", value, score)
+		}
+	}
+	answer := answers["Q01"]
+	answer.Evidence = "Record [ND-01], verified."
+	answers["Q01"] = answer
+	data, _ := json.Marshal(answers)
+	if score := Response(root, map[string]any{"_extracted_text": string(data)}, 0); score.State != "passed" {
+		t.Fatalf("valid evidence failed: %#v", score)
+	}
+}
+
 func TestFiftyAnchorsGenerateAndScore(t *testing.T) {
 	root := t.TempDir()
 	manifest, err := corpus.Generate(root, 13000, 2026110804, 1, 50, []string{"needle", "multi_hop", "conflict", "adversarial"})
