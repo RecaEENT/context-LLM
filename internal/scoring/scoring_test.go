@@ -39,18 +39,20 @@ func TestEvidenceRequiresCompleteRecordID(t *testing.T) {
 		t.Fatal(err)
 	}
 	answers := readAnswers(t, root)
-	for _, value := range []string{"ND-010", "wrong-ND-01"} {
-		answer := answers["Q01"]
+	qid := firstQuestionForMode(t, answers, "needle")
+	correctID := answers[qid].Evidence
+	for _, value := range []string{correctID + "0", "wrong-" + correctID} {
+		answer := answers[qid]
 		answer.Evidence = value
-		answers["Q01"] = answer
+		answers[qid] = answer
 		data, _ := json.Marshal(answers)
 		if score := Response(root, ResponseInput{Text: string(data)}, 0); score.State != "scored_failure" {
 			t.Fatalf("incorrect evidence %q passed: %#v", value, score)
 		}
 	}
-	answer := answers["Q01"]
-	answer.Evidence = "Record [ND-01], verified."
-	answers["Q01"] = answer
+	answer := answers[qid]
+	answer.Evidence = "Record [" + correctID + "], verified."
+	answers[qid] = answer
 	data, _ := json.Marshal(answers)
 	if score := Response(root, ResponseInput{Text: string(data)}, 0); score.State != "passed" {
 		t.Fatalf("valid evidence failed: %#v", score)

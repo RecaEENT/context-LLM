@@ -15,6 +15,8 @@ import (
 	"context-LLM/internal/config"
 )
 
+const GeneratorVersion = 2
+
 type Answer struct {
 	Answer   string `json:"answer"`
 	Evidence string `json:"evidence"`
@@ -39,16 +41,24 @@ type BenchmarkCase struct {
 	Records  []string
 }
 
+type RecordPosition struct {
+	QuestionID  string `json:"question_id"`
+	Mode        string `json:"mode"`
+	OffsetBytes int    `json:"offset_bytes"`
+}
+
 type Manifest struct {
-	RequestedContextTokens int      `json:"requested_context_tokens"`
-	ReservedHeadroomTokens int      `json:"reserved_headroom_tokens"`
-	MaterialTokenTarget    int      `json:"material_token_target_estimate"`
-	CharsPerTokenEstimate  float64  `json:"chars_per_token_estimate"`
-	File                   string   `json:"file"`
-	Characters             int      `json:"characters"`
-	SHA256                 string   `json:"sha256"`
-	AnchorCount            int      `json:"anchor_count"`
-	TestModes              []string `json:"test_modes"`
+	GeneratorVersion       int              `json:"generator_version"`
+	RequestedContextTokens int              `json:"requested_context_tokens"`
+	ReservedHeadroomTokens int              `json:"reserved_headroom_tokens"`
+	MaterialTokenTarget    int              `json:"material_token_target_estimate"`
+	CharsPerTokenEstimate  float64          `json:"chars_per_token_estimate"`
+	File                   string           `json:"file"`
+	Characters             int              `json:"characters"`
+	SHA256                 string           `json:"sha256"`
+	AnchorCount            int              `json:"anchor_count"`
+	TestModes              []string         `json:"test_modes"`
+	RecordPositions        []RecordPosition `json:"record_positions"`
 }
 
 func Generate(out string, tier int, seed int64, charsPerToken float64, anchorCount int, testModes []string) (Manifest, error) {
@@ -63,7 +73,7 @@ func Generate(out string, tier int, seed int64, charsPerToken float64, anchorCou
 		return Manifest{}, err
 	}
 
-	material := buildMaterial(
+	material, positions := buildMaterial(
 		int(math.Round(float64(tier-config.HeadroomTokens)*charsPerToken)),
 		seed+int64(tier),
 		cases,
@@ -74,6 +84,7 @@ func Generate(out string, tier int, seed int64, charsPerToken float64, anchorCou
 	}
 	digest := sha256.Sum256([]byte(material))
 	manifest := Manifest{
+		GeneratorVersion:       GeneratorVersion,
 		RequestedContextTokens: tier,
 		ReservedHeadroomTokens: config.HeadroomTokens,
 		MaterialTokenTarget:    tier - config.HeadroomTokens,
@@ -83,6 +94,7 @@ func Generate(out string, tier int, seed int64, charsPerToken float64, anchorCou
 		SHA256:                 hex.EncodeToString(digest[:]),
 		AnchorCount:            anchorCount,
 		TestModes:              append([]string(nil), testModes...),
+		RecordPositions:        positions,
 	}
 	if err := writeJSON(filepath.Join(out, "manifest.json"), []Manifest{manifest}); err != nil {
 		return Manifest{}, err
@@ -94,7 +106,20 @@ func benchmarkCases(seed int64, anchorCount int, modes []string) []BenchmarkCase
 	rng := mathrand.New(mathrand.NewSource(seed))
 	colors := []string{"amber", "cobalt", "jade", "ivory", "magenta", "ochre", "saffron", "teal"}
 	animals := []string{"badger", "crane", "dolphin", "falcon", "gecko", "heron", "lynx", "otter"}
-	people := []string{"Avery Chen", "Blair Imani", "Casey Rowan", "Drew Sato", "Ellis Park", "Finley Noor", "Gray Torres", "Harper Vale"}
+	people := []string{"Avery Chen", "Blair Imani", "Casey Rowan", "Drew Sato", "Ellis Park", "Finley Noor", "Gray Torres", "Harper Vale", "Jordan Kim", "Morgan Lee", "Reese Patel", "Taylor Brooks", "Quinn Silva", "Riley Moss", "Samir Lane", "Robin West"}
+	usedIDs := map[string]bool{}
+	nextID := func(prefix string) string {
+		for {
+			id := fmt.Sprintf("%s-%08X", prefix, rng.Uint32())
+			if !usedIDs[id] {
+				usedIDs[id] = true
+				return id
+			}
+		}
+	}
+	newValue := func() string {
+		return fmt.Sprintf("%s-%s-%d", pick(rng, colors), pick(rng, animals), rng.Intn(9000)+1000)
+	}
 	cases := make([]BenchmarkCase, 0, anchorCount)
 	assignments := make([]string, anchorCount-1)
 	for index := range assignments {
@@ -104,12 +129,33 @@ func benchmarkCases(seed int64, anchorCount int, modes []string) []BenchmarkCase
 		assignments[i], assignments[j] = assignments[j], assignments[i]
 	})
 
-	for index := 1; index < anchorCount; index++ {
+	abstentionIndex := rng.Intn(anchorCount) + 1
+	assignmentIndex := 0
+	for index := 1; index <= anchorCount; index++ {
 		qid := questionID(index)
-		mode := assignments[index-1]
-		value := fmt.Sprintf("%s-%s-%d", pick(rng, colors), pick(rng, animals), rng.Intn(9000)+1000)
-		project := fmt.Sprintf("%s-%02d", pick(rng, animals), index)
-		budget := fmt.Sprintf("%s-budget-%02d", pick(rng, colors), index)
+		if index == abstentionIndex {
+			missing := []struct{ field, plural string }{
+				{"birth date", "birth dates"},
+				{"home address", "home addresses"},
+				{"telephone number", "telephone numbers"},
+			}
+			item := missing[rng.Intn(len(missing))]
+			id := nextID("R")
+			cases = append(cases, BenchmarkCase{
+				ID: qid, Mode: "abstention",
+				Question: fmt.Sprintf("What is the project owner's %s?", item.field),
+				Answer:   Answer{Answer: "INSUFFICIENT", Evidence: id},
+				Records:  []string{fmt.Sprintf("Privacy inventory %s: These records contain no %s.\n", id, item.plural)},
+			})
+			continue
+		}
+		mode := assignments[assignmentIndex]
+		assignmentIndex++
+		value := newValue()
+		item := nextID("ITEM")
+		project := nextID("PROJECT")
+		budget := nextID("BUDGET")
+		firstID, secondID := nextID("R"), nextID("R")
 		oldOwner := pick(rng, people)
 		newOwner := pick(rng, people)
 		for newOwner == oldOwner {
@@ -118,36 +164,51 @@ func benchmarkCases(seed int64, anchorCount int, modes []string) []BenchmarkCase
 
 		switch mode {
 		case "needle":
+			question := []string{"What is the registered code for %s?", "Which code is recorded for %s?", "Give the registry code associated with %s."}
 			cases = append(cases, BenchmarkCase{
 				ID:       qid,
 				Mode:     mode,
-				Question: fmt.Sprintf("What is the verified retrieval value for %s?", qid),
-				Answer:   Answer{Answer: value, Evidence: fmt.Sprintf("ND-%02d", index)},
+				Question: fmt.Sprintf(pick(rng, question), item),
+				Answer:   Answer{Answer: value, Evidence: firstID},
 				Records: []string{
-					fmt.Sprintf("AUTHORITATIVE NEEDLE ND-%02d: The verified retrieval value for %s is %s.\n", index, qid, value),
+					fmt.Sprintf("Registry record %s: The registered code for %s is %s.\n", firstID, item, value),
 				},
 			})
 		case "adversarial":
+			sources := []string{"North", "South", "East"}
+			selected := rng.Intn(len(sources))
+			usedValues := map[string]bool{value: true}
+			records := []string{fmt.Sprintf("Registry rule %s: For %s, use the code from the %s register.\n", firstID, item, sources[selected])}
+			answerID := ""
+			for sourceIndex, source := range sources {
+				id := nextID("R")
+				candidate := value
+				if sourceIndex == selected {
+					answerID = id
+				} else {
+					for usedValues[candidate] {
+						candidate = newValue()
+					}
+					usedValues[candidate] = true
+				}
+				records = append(records, fmt.Sprintf("Registry record %s: The %s register lists %s with code %s.\n", id, source, item, candidate))
+			}
 			cases = append(cases, BenchmarkCase{
 				ID:       qid,
 				Mode:     mode,
-				Question: fmt.Sprintf("What is the verified retrieval value for %s?", qid),
-				Answer:   Answer{Answer: value, Evidence: fmt.Sprintf("AD-%02d", index)},
-				Records: []string{
-					fmt.Sprintf("EARLIER REVISION LK-%02d: During an earlier revision, %s mapped to %s-%d.\n", index, qid, strings.Split(value, "-")[0], rng.Intn(9000)+1000),
-					fmt.Sprintf("ADVISORY NOTE AD-NOTE-%02d: A related candidate value for %s is %s-%d.\n", index, qid, strings.Split(value, "-")[0], rng.Intn(9000)+1000),
-					fmt.Sprintf("AUTHORITATIVE ADVERSARIAL AD-%02d: The verified retrieval value for %s is %s.\n", index, qid, value),
-				},
+				Question: fmt.Sprintf("According to the registry rule, what code applies to %s?", item),
+				Answer:   Answer{Answer: value, Evidence: firstID + " and " + answerID},
+				Records:  records,
 			})
 		case "conflict":
 			cases = append(cases, BenchmarkCase{
 				ID:       qid,
 				Mode:     mode,
 				Question: fmt.Sprintf("Who is the current owner of project %s?", project),
-				Answer:   Answer{Answer: newOwner, Evidence: fmt.Sprintf("CF-OLD-%02d and CF-NEW-%02d", index, index)},
+				Answer:   Answer{Answer: newOwner, Evidence: firstID + " and " + secondID},
 				Records: []string{
-					fmt.Sprintf("POLICY CONFLICT CF-OLD-%02d: At first release, the owner of project %s was %s.\n", index, project, oldOwner),
-					fmt.Sprintf("POLICY CONFLICT CF-NEW-%02d: Effective 2026-10-31, this supersedes CF-OLD-%02d; the current owner of project %s is %s.\n", index, index, project, newOwner),
+					fmt.Sprintf("Project record %s: For %s, the initial owner was %s and the deputy was %s.\n", firstID, project, oldOwner, newOwner),
+					fmt.Sprintf("Project update %s: For %s, the initial ownership in %s is superseded; the deputy named in %s is now the owner.\n", secondID, project, firstID, firstID),
 				},
 			})
 		case "multi_hop":
@@ -155,34 +216,28 @@ func benchmarkCases(seed int64, anchorCount int, modes []string) []BenchmarkCase
 				ID:       qid,
 				Mode:     mode,
 				Question: fmt.Sprintf("Who personally approves the %s?", budget),
-				Answer:   Answer{Answer: newOwner, Evidence: fmt.Sprintf("MH-ROLE-%02d and MH-APPROVAL-%02d", index, index)},
+				Answer:   Answer{Answer: newOwner, Evidence: firstID + " and " + secondID},
 				Records: []string{
-					fmt.Sprintf("ROLE RECORD MH-ROLE-%02d: The current owner of project %s is %s.\n", index, project, newOwner),
-					fmt.Sprintf("APPROVAL RECORD MH-APPROVAL-%02d: The %s must be personally approved by the current owner of project %s.\n", index, budget, project),
+					fmt.Sprintf("Role record %s: The owner of project %s is %s.\n", firstID, project, newOwner),
+					fmt.Sprintf("Approval record %s: Budget %s must be personally approved by the owner of project %s.\n", secondID, budget, project),
 				},
 			})
 		}
 	}
 
-	limitID := questionID(anchorCount)
-	return append(cases, BenchmarkCase{
-		ID:       limitID,
-		Mode:     "abstention",
-		Question: "What is the project owner's birth date? If absent, answer INSUFFICIENT.",
-		Answer:   Answer{Answer: "INSUFFICIENT", Evidence: "LIMIT-01"},
-		Records: []string{
-			"LIMIT RECORD LIMIT-01: The records contain no birth dates, home addresses, or telephone numbers.\n",
-		},
-	})
+	return cases
 }
 
-func buildMaterial(targetChars int, seed int64, cases []BenchmarkCase) string {
+func buildMaterial(targetChars int, seed int64, cases []BenchmarkCase) (string, []RecordPosition) {
 	rng := mathrand.New(mathrand.NewSource(seed))
 	digest := sha256.Sum256([]byte(strconv.FormatInt(seed, 10)))
 	tag := hex.EncodeToString(digest[:])[:12]
-	records := []string{}
+	type placedRecord struct{ text, questionID, mode string }
+	records := []placedRecord{}
 	for _, testCase := range cases {
-		records = append(records, testCase.Records...)
+		for _, record := range testCase.Records {
+			records = append(records, placedRecord{record, testCase.ID, testCase.Mode})
+		}
 	}
 	rng.Shuffle(len(records), func(i, j int) {
 		records[i], records[j] = records[j], records[i]
@@ -190,28 +245,41 @@ func buildMaterial(targetChars int, seed int64, cases []BenchmarkCase) string {
 
 	var builder strings.Builder
 	builder.Grow(targetChars + 4096)
-	builder.WriteString("LONG-CONTEXT EVALUATION CORPUS " + tag + "\nAuthority order: a later POLICY RECORD supersedes an earlier POLICY RECORD; AUTHORITATIVE RECORD outranks ADVISORY and EARLIER REVISION records.\n\n")
+	builder.WriteString("LONG-CONTEXT EVALUATION CORPUS " + tag + "\nFollow each registry rule and explicit project update when interpreting the records.\n\n")
+	positions := make([]RecordPosition, 0, len(records))
+	targets := make([]int, len(records))
+	for i := range records {
+		targets[i] = int(float64(targetChars) * (float64(i) + rng.Float64()) / float64(len(records)))
+	}
+	filler := []string{
+		"the operational ledger records routine catalog updates and neutral administrative observations",
+		"a quarterly archive indexes correspondence and ordinary shipment summaries",
+		"the records office reviews routine filing schedules and internal catalog entries",
+		"a maintenance log notes standard inventory checks and document routing",
+		"the administrative register lists ordinary meeting notes and archive references",
+		"a processing journal describes routine reviews and neutral ledger updates",
+	}
 	nextAnchor, fillerIndex := 0, 1
 	for builder.Len() < targetChars {
-		position := 0.03
-		if len(records) > 1 {
-			position += 0.93 * float64(nextAnchor) / float64(len(records)-1)
-		}
-		if nextAnchor < len(records) && builder.Len() >= int(float64(targetChars)*position) {
-			builder.WriteString(records[nextAnchor])
+		if nextAnchor < len(records) && builder.Len() >= targets[nextAnchor] {
+			record := records[nextAnchor]
+			positions = append(positions, RecordPosition{record.questionID, record.mode, builder.Len()})
+			builder.WriteString(record.text)
 			nextAnchor++
 			continue
 		}
-		fmt.Fprintf(&builder, "Archive %s segment %06d: the operational ledger records routine catalog updates, validated shipment notes, indexed correspondence, quarterly summaries, and neutral administrative observations. No decision is implied by this routine record.\n", tag, fillerIndex)
+		fmt.Fprintf(&builder, "Archive %s segment %06d: %s.\n", tag, fillerIndex, pick(rng, filler))
 		if fillerIndex%17 == 0 {
 			fmt.Fprintf(&builder, "Filing note %s-%06d: revision bucket %d remains routine.\n", tag, fillerIndex, rng.Intn(90000)+10000)
 		}
 		fillerIndex++
 	}
 	for ; nextAnchor < len(records); nextAnchor++ {
-		builder.WriteString(records[nextAnchor])
+		record := records[nextAnchor]
+		positions = append(positions, RecordPosition{record.questionID, record.mode, builder.Len()})
+		builder.WriteString(record.text)
 	}
-	return builder.String()
+	return builder.String(), positions
 }
 
 func questionSet(cases []BenchmarkCase) QuestionSet {

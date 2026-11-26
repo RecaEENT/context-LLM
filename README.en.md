@@ -146,7 +146,11 @@ Available modes:
 
 An abstention question for insufficient material is always included.
 
-Evidence is matched by complete record ID, ignoring case; surrounding text and punctuation are allowed. For example, `ND-01` does not match `ND-010` or `wrong-ND-01`. When multiple records are required, each ID must be present.
+Evidence is matched by complete record ID, ignoring case; surrounding text and punctuation are allowed. For example, `R-A1B2C3D4` does not match `R-A1B2C3D40` or `wrong-R-A1B2C3D4`. When multiple records are required, each ID must be present.
+
+**For weaker models:** keep `anchor_count = 13` and start with `test_modes = needle`, leaving `multi_hop`, `conflict`, and `adversarial` disabled initially. Start with smaller tiers supported by the service and your budget, then add modes gradually after consistent passes. One abstention question is always included. `evidence_tolerance` can be relaxed cautiously, but all answers must still be correct; record the setting when interpreting results.
+
+Question generator version 2 uses independently randomized record IDs and conflict and adversarial questions that require combining records. The report and public configuration record the generator version; the material manifest in response metadata records each question record's byte offset, not its token position. Question content and difficulty have changed, so results from different generator versions should not be compared directly.
 
 ### Output And Preview
 
@@ -247,7 +251,7 @@ Resume a specific run directory:
 
 Resume validates the configuration fingerprint. The checkpoint updates after every trial; completed trials are reused and only missing trials are rerun. Tier progress, probe state, binary-search bounds, completed attempt counts, and response metadata are also preserved.
 
-Checkpoints preserve the active calibration. Version 1 checkpoints lack the necessary state and cannot be resumed by this version; start a new run instead.
+Checkpoints preserve the active calibration. Versions 1 and 2 cannot be resumed by this version because the question generator has changed; start a new run to avoid mixing question sets from different versions.
 
 ## Verification
 

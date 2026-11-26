@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"context-LLM/internal/config"
+	"context-LLM/internal/corpus"
 	"context-LLM/internal/provider"
 	"context-LLM/internal/runner"
 )
@@ -321,6 +322,7 @@ func Markdown(cfg config.Config, trials []runner.Trial, root string) string {
 		"",
 		"- Provider: `" + cfg.BaseURL + "`",
 		"- Model: `" + cfg.Model + "`",
+		fmt.Sprintf("- Question generator version: `%d`", corpus.GeneratorVersion),
 		"- Run folder: `" + filepath.Base(root) + "`",
 		"- Test modes: `" + strings.Join(cfg.TestModes, ",") + "`",
 		"- Evidence tolerance: `" + strconv.Itoa(cfg.EvidenceTolerance) + "` (all answers must still be correct).",
@@ -358,6 +360,7 @@ func MarkdownChinese(cfg config.Config, trials []runner.Trial, root string) stri
 		"",
 		"- 服务商：`" + cfg.BaseURL + "`",
 		"- 模型：`" + cfg.Model + "`",
+		fmt.Sprintf("- 题库生成器版本：`%d`", corpus.GeneratorVersion),
 		"- 运行目录：`" + filepath.Base(root) + "`",
 		"- 测试题型：`" + strings.Join(cfg.TestModes, ",") + "`",
 		"- 证据宽容度：`" + strconv.Itoa(cfg.EvidenceTolerance) + "`（所有答案仍必须正确）。",
@@ -670,6 +673,7 @@ func calibrationForTrial(cfg config.Config, trials []runner.Trial, target runner
 
 func PublicConfig(cfg config.Config) map[string]any {
 	return map[string]any{
+		"generator_version":       corpus.GeneratorVersion,
 		"base_url":                cfg.BaseURL,
 		"model":                   cfg.Model,
 		"api_mode":                cfg.APIMode,

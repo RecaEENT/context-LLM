@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -153,6 +154,16 @@ func TestCheckpointRoundTripAndConfigGuard(t *testing.T) {
 	changed.StructuredOutput = !cfg.StructuredOutput
 	if _, err := LoadCheckpoint(path, changed); err == nil {
 		t.Fatal("expected structured output change to be rejected")
+	}
+}
+
+func TestPreviousCheckpointVersionIsRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	if err := os.WriteFile(path, []byte(`{"version":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCheckpoint(path, config.Config{}); err == nil || !strings.Contains(err.Error(), "unsupported checkpoint version 2") {
+		t.Fatalf("old checkpoint was not rejected: %v", err)
 	}
 }
 

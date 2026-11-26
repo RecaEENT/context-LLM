@@ -13,7 +13,7 @@ import (
 	"context-LLM/internal/config"
 )
 
-const checkpointVersion = 2
+const checkpointVersion = 3
 
 type Checkpoint struct {
 	Version         int     `json:"version"`

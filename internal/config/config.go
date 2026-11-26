@@ -259,6 +259,9 @@ anchor_count         = 13      # 题目总数；弱模型建议从默认值开�
 evidence_tolerance   = 0       # 宽容的证据错误数；弱模型也不建议超过 2
 
 # 可用题型：needle / multi_hop / conflict / adversarial
+# 弱模型可先设置 test_modes = needle，暂不启用多跳、冲突和对抗题。
+# 简单题稳定通过后再逐步加入其他题型；始终包含一道材料不足题。
+# 档位应结合服务支持的上下文和预算，从较小档位开始。
 test_modes           = needle,multi_hop,conflict,adversarial # 逗号分隔，至少保留一种
 
 # RESULTS.md 输出语言：en（英文）或 cn（中文）

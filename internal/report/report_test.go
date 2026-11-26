@@ -21,6 +21,9 @@ func TestPublicConfigExcludesAPIKey(t *testing.T) {
 	if values["model"] != "model" {
 		t.Fatalf("unexpected model: %#v", values["model"])
 	}
+	if values["generator_version"] != 2 {
+		t.Fatalf("missing generator version: %#v", values)
+	}
 }
 
 func TestMarkdownIncludesEnabledModes(t *testing.T) {
